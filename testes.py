@@ -8,6 +8,7 @@ from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, root_mean_squared_error
 from sklearn.model_selection import cross_val_score
 from sklearn.metrics import mean_absolute_error, precision_score, recall_score, f1_score
+from sklearn.preprocessing import MinMaxScaler
 
 # carrega corretamente o arquivo que servirá de base para o treinamento dos modelos
 diretorio_atual = os.path.dirname(os.path.abspath(__file__))
@@ -62,7 +63,7 @@ print("*"*10)
 
 # usa a função do sklearn para criar o modelo de random forest para regressão
 # n_estimators é o número de árvores na floresta e random_state é a semente para gerar os mesmos resultados em cada execução
-rf_reg = RandomForestRegressor(n_estimators=100, random_state=42)
+rf_reg = RandomForestRegressor(n_estimators=10, random_state=42)
 
 # treina o modelo de random forest para regressão usando os dados de treinamento 
 # depois faz as predições com os dados de teste
@@ -79,7 +80,7 @@ print("CLASSIFICAÇÃO")
 print("*"*10)
 
 # de novo usa a função do sklearn para criar o modelo de random forest para classificação, com os mesmos parâmetros de antes
-rf_clf = RandomForestClassifier(n_estimators=100, criterion='gini', random_state=42)
+rf_clf = RandomForestClassifier(n_estimators=10, criterion='gini', random_state=42)
 
 # treina o modelo de random forest para classificação usando os dados de treinamento e depois faz as predições com os dados de teste
 rf_clf.fit(X_train, y_class_train)
@@ -106,12 +107,25 @@ print("*"*10)
 
 # usa a função do sklearn para criar o modelo de rede neural MLP para regressão
 # usa 2 camadas ocultas (8 e 4 neurônios), função de ativação ReLU, otimizador Adam e 1500 iterações
-mlp_reg = MLPRegressor(hidden_layer_sizes=(8, 4), activation='relu', solver='adam', max_iter=1500, random_state=42)
+mlp_reg = MLPRegressor(hidden_layer_sizes=(4, 2), activation='relu', solver='adam', max_iter=1500, random_state=42)
 
-# treina o modelo de rede neural MLP para regressão usando os dados de treinamento escalonados e depois faz as predições com os dados de teste
-# usa os dados escalonados porque as redes neurais geralmente performam melhor quando os dados estão na mesma escala, evitando que uma variável domine as outras
-mlp_reg.fit(X_train_scaled, y_reg_train)
-mlp_pred_reg = mlp_reg.predict(X_test_scaled)
+# cria o escalonador exclusivo para a variável alvo (gravidade)
+scaler_g = MinMaxScaler()
+
+# transforma o y_train para a escala 0 a 1
+y_reg_train_scaled = scaler_g.fit_transform(y_reg_train.values.reshape(-1, 1)).ravel()
+
+# treina o modelo de rede neural MLP com os dados de entrada E saída escalonados
+mlp_reg.fit(X_train_scaled, y_reg_train_scaled)
+
+# faz as predições (o resultado sairá na escala 0 a 1)
+mlp_pred_reg_scaled = mlp_reg.predict(X_test_scaled)
+
+# --- NOVA LINHA AQUI: Impede a rede de extrapolar os limites no teste de validação ---
+mlp_pred_reg_scaled = np.clip(mlp_pred_reg_scaled, 0, 1)
+
+# reverte as predições para a escala real da gravidade para podermos calcular o RMSE corretamente
+mlp_pred_reg = scaler_g.inverse_transform(mlp_pred_reg_scaled.reshape(-1, 1)).ravel()
 
 # calcula o RMSE para avaliar a performance do modelo de regressão da rede neural MLP 
 rmse_mlp = root_mean_squared_error(y_reg_test, mlp_pred_reg)
@@ -122,7 +136,7 @@ print("CLASSIFICAÇÃO")
 print("*"*10)
 
 # usa novamente a função do sklearn para criar o modelo de rede neural MLP para classificação, com os mesmos parâmetros de antes
-mlp_clf = MLPClassifier(hidden_layer_sizes=(8, 4), activation='relu', solver='adam', max_iter=1500, random_state=42)
+mlp_clf = MLPClassifier(hidden_layer_sizes=(4, 2), activation='relu', solver='adam', max_iter=1500, random_state=42)
 
 # treina o modelo e faz as predições
 mlp_clf.fit(X_train_scaled, y_class_train)
@@ -161,7 +175,16 @@ if os.path.exists(caminho_cego):
     
     # executa as predições com o modelo treinado da rede neural MLP usando regressão e classificação
     X_cego_scaled = scaler.transform(X_cego)
-    mlp_cego_g = mlp_reg.predict(X_cego_scaled)
+
+    # faz a predição da gravidade (sairá na escala de 0 a 1)
+    mlp_cego_g_scaled = mlp_reg.predict(X_cego_scaled)
+    
+    # --- NOVA LINHA AQUI: Força os palpites da rede a ficarem estritamente entre 0 e 1 ---
+    mlp_cego_g_scaled = np.clip(mlp_cego_g_scaled, 0, 1)
+    
+    # reverte para a escala original (agora o menor valor possível será o mínimo do seu treino)
+    mlp_cego_g = scaler_g.inverse_transform(mlp_cego_g_scaled.reshape(-1, 1)).ravel()
+
     mlp_cego_y = mlp_clf.predict(X_cego_scaled)
     
     # prepara os dados para salvar em arquivos de texto, arredondando a gravidade para 4 casas decimais
@@ -189,3 +212,29 @@ if os.path.exists(caminho_cego):
     
     print(f"Concordância na classe: {concordancia_classes:.2f}%")
     print(f"Diferença média na gravidade: {dif_media_gravidade:.4f} pontos.")
+
+# ==============================================================================
+    # MÉTRICAS EXTRAS PARA O APÊNDICE DO TESTE CEGO
+    # ==============================================================================
+    print("\n" + "="*40)
+    print("MÉTRICAS COMPLEMENTARES PARA O APÊNDICE")
+    print("="*40)
+    
+    # 1. Distribuição de Classes (Frequência Absoluta)
+    print("\nDistribuicao de Classes - Random Forest:")
+    print(df_saida_rf['classe'].value_counts().sort_index())
+    
+    print("\nDistribuicao de Classes - MLP:")
+    print(df_saida_mlp['classe'].value_counts().sort_index())
+    
+    # 2. Matriz de Cruzamento (RF vs MLP)
+    print("\nMatriz de Cruzamento de Decisoes (Linha: RF, Coluna: MLP):")
+    matriz_cruzada = pd.crosstab(df_saida_rf['classe'], df_saida_mlp['classe'])
+    print(matriz_cruzada)
+    
+    # 3. Estatísticas da Gravidade Continua
+    print("\nEstatísticas da Gravidade - Random Forest:")
+    print(df_saida_rf['gravid'].describe()[['mean', 'std', 'min', 'max']])
+    
+    print("\nEstatísticas da Gravidade - MLP:")
+    print(df_saida_mlp['gravid'].describe()[['mean', 'std', 'min', 'max']])
